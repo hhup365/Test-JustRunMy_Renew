@@ -11,20 +11,28 @@ import requests
 from seleniumbase import SB
 
 LOGIN_URL = "https://justrunmy.app/id/Account/Login"
-APPS_URL  = "https://justrunmy.app/panel/applications"
 DOMAIN    = "justrunmy.app"
 
 EMAIL        = os.environ.get("ACC")
 PASSWORD     = os.environ.get("ACC_PWD")
 TG_BOT_TOKEN = os.environ.get("TG_TOKEN")
 TG_CHAT_ID   = os.environ.get("TG_ID")
+APP_IDS_RAW  = os.environ.get("APP_IDS", "").strip()
 
 if not EMAIL or not PASSWORD:
     print("致命错误：未找到 ACC 或 ACC_PWD 环境变量！")
-    print("请检查 GitHub Repository Secrets 是否配置正确。")
     sys.exit(1)
 
-DYNAMIC_APP_NAME = "未知应用"
+if not APP_IDS_RAW:
+    print("致命错误：未找到 APP_IDS 环境变量！")
+    print("请配置 ID_x Secret，值为应用 ID，多个用逗号分隔，如: 37754,37755")
+    sys.exit(1)
+
+# 支持逗号/空格/换行分隔的多个应用 ID
+APP_IDS = [i for i in re.split(r"[,\s]+", APP_IDS_RAW) if i.isdigit()]
+if not APP_IDS:
+    print(f"致命错误：APP_IDS 格式无效: {APP_IDS_RAW}")
+    sys.exit(1)
 
 def mask_ip(ip_str: str) -> str:
     try:
@@ -39,7 +47,6 @@ def mask_ip(ip_str: str) -> str:
     return "*.*.*.*"
 
 def dump_debug(sb, name: str):
-    """失败时同时保存截图和渲染后的 DOM，方便排查 Blazor 页面"""
     try:
         sb.save_screenshot(f"{name}.png")
     except Exception:
@@ -54,7 +61,7 @@ def dump_debug(sb, name: str):
 # ============================================================
 #  Telegram 推送模块
 # ============================================================
-def send_tg_message(status_icon, status_text, time_left):
+def send_tg_message(status_icon, status_text, time_left, app_name="未知应用"):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("未配置 TG_TOKEN 或 TG_ID，跳过 Telegram 推送。")
         return
@@ -75,7 +82,7 @@ def send_tg_message(status_icon, status_text, time_left):
         "🔄 *JustRunMy* 自动续期报告\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"{header}\n"
-        f"🖥  应用：`{DYNAMIC_APP_NAME}`\n"
+        f"🖥  应用：`{app_name}`\n"
         f"📋  状态：{status_text}\n"
         f"⏳  剩余：`{time_left}`\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -83,11 +90,7 @@ def send_tg_message(status_icon, status_text, time_left):
     )
 
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
+    payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown"}
 
     try:
         r = requests.post(url, json=payload, timeout=10)
@@ -172,29 +175,6 @@ _WININFO_JS = """
 })()
 """
 
-# 在应用列表页查找应用链接（Blazor 渲染后的 DOM 中查找）
-_FIND_APP_JS = """
-(function(){
-    var links = document.querySelectorAll('a[href*="/panel/application/"]');
-    for (var i = 0; i < links.length; i++) {
-        var href = links[i].getAttribute('href') || '';
-        if (/\\/panel\\/application\\/\\d+/.test(href)) {
-            var h3 = links[i].querySelector('h3');
-            var name = h3 ? h3.textContent.trim() : links[i].textContent.trim().split('\\n')[0];
-            return {href: href, name: name || '未知应用'};
-        }
-    }
-    // 后备：卡片不是 <a>，而是可点击 div/h3
-    var h3s = document.querySelectorAll('h3');
-    for (var j = 0; j < h3s.length; j++) {
-        var t = h3s[j].textContent.trim();
-        if (t.length > 0 && t.length < 100)
-            return {href: null, name: t};
-    }
-    return null;
-})()
-"""
-
 # ============================================================
 #  底层输入工具
 # ============================================================
@@ -268,7 +248,6 @@ def _click_turnstile(sb):
 #  Blazor 渲染等待
 # ============================================================
 def wait_for_blazor(sb, check_js: str, timeout: int = 30, desc: str = "内容") -> bool:
-    """轮询等待 Blazor SignalR 渲染出目标内容"""
     print(f"等待 Blazor 渲染{desc}（最长 {timeout}s）...")
     for i in range(timeout * 2):
         try:
@@ -377,62 +356,28 @@ def login(sb) -> bool:
     return False
 
 # ============================================================
-#  自动续期模块
+#  单应用续期
 # ============================================================
-def renew(sb) -> bool:
-    global DYNAMIC_APP_NAME
+def renew_app(sb, app_id: str) -> bool:
+    detail_url = f"https://{DOMAIN}/panel/application/{app_id}"
+    app_name = f"App-{app_id}"
 
     print("\n" + "=" * 50)
-    print("   开始自动续期流程")
+    print(f"   续期应用 ID: {app_id}")
     print("=" * 50)
 
-    # ── 1. 进入应用列表页 ────────────────────────────────────
-    print(f"进入应用列表页: {APPS_URL}")
-    sb.open(APPS_URL)
-
-    # 若被重定向回登录页，说明会话丢失
+    # ── 1. 直接打开应用详情页 ────────────────────────────────
+    print(f"打开应用详情页: {detail_url}")
+    sb.open(detail_url)
     time.sleep(3)
+
     if "/Account/Login" in sb.get_current_url():
         print("被重定向回登录页，会话已失效！")
-        dump_debug(sb, "renew_session_lost")
-        send_tg_message("[X]", "续期失败(会话失效)", "未知")
+        dump_debug(sb, f"renew_{app_id}_session_lost")
+        send_tg_message("[X]", "续期失败(会话失效)", "未知", app_name)
         return False
 
-    # ── 2. 等待 Blazor 渲染出应用链接并进入详情页 ───────────
-    if not wait_for_blazor(sb, "return " + _FIND_APP_JS + " !== null",
-                           timeout=30, desc="应用列表"):
-        print(f"当前 URL: {sb.get_current_url()}")
-        dump_debug(sb, "renew_app_not_found")
-        send_tg_message("[X]", "续期失败(找不到应用)", "未知")
-        return False
-
-    app_info = sb.execute_script("return " + _FIND_APP_JS)
-    DYNAMIC_APP_NAME = app_info.get("name") or "未知应用"
-    app_href = app_info.get("href")
-    print(f"成功抓取到应用: {DYNAMIC_APP_NAME} -> {app_href}")
-
-    if app_href:
-        # 直接导航到详情页（比模拟点击更可靠）
-        detail_url = app_href if app_href.startswith("http") else f"https://{DOMAIN}{app_href}"
-        print(f"打开应用详情页: {detail_url}")
-        sb.open(detail_url)
-    else:
-        # 后备：点击 h3 卡片
-        print("未找到链接，尝试点击应用卡片...")
-        try:
-            sb.click('a[href*="/panel/application/"]')
-        except Exception:
-            sb.click('h3')
-    time.sleep(3)
-
-    if not re.search(r"/panel/application/\d+", sb.get_current_url()):
-        print(f"未能进入应用详情页，当前 URL: {sb.get_current_url()}")
-        dump_debug(sb, "renew_detail_fail")
-        send_tg_message("[X]", "续期失败(无法进入详情页)", "未知")
-        return False
-    print(f"成功进入应用详情页: {sb.get_current_url()}")
-
-    # ── 3. 等待并点击 Reset Timer ────────────────────────────
+    # ── 2. 等待 Blazor 渲染出 Reset Timer 按钮 ───────────────
     _reset_btn_js = """
     return (function(){
         var btns = document.querySelectorAll('button');
@@ -441,33 +386,49 @@ def renew(sb) -> bool:
         return false;
     })()
     """
-    if not wait_for_blazor(sb, _reset_btn_js, timeout=20, desc="Reset Timer 按钮"):
-        dump_debug(sb, "renew_reset_btn_not_found")
-        send_tg_message("[X]", "续期失败(找不到按钮)", "未知")
+    if not wait_for_blazor(sb, _reset_btn_js, timeout=30, desc="Reset Timer 按钮"):
+        print(f"当前 URL: {sb.get_current_url()}")
+        dump_debug(sb, f"renew_{app_id}_reset_btn_not_found")
+        send_tg_message("[X]", "续期失败(找不到按钮)", "未知", app_name)
         return False
 
+    # ── 3. 尝试读取应用名称（可选，失败不影响流程）───────────
+    try:
+        name = sb.execute_script("""
+            return (function(){
+                var h = document.querySelector('h1, h2, h3');
+                return h ? h.textContent.trim() : '';
+            })()
+        """)
+        if name:
+            app_name = name
+            print(f"应用名称: {app_name}")
+    except Exception:
+        pass
+
+    # ── 4. 点击 Reset Timer ──────────────────────────────────
     print("点击 Reset Timer 按钮...")
     try:
         sb.click('button:contains("Reset Timer")')
         time.sleep(3)
     except Exception as e:
         print(f"点击 Reset Timer 失败: {e}")
-        dump_debug(sb, "renew_reset_click_fail")
-        send_tg_message("[X]", "续期失败(点击按钮失败)", "未知")
+        dump_debug(sb, f"renew_{app_id}_reset_click_fail")
+        send_tg_message("[X]", "续期失败(点击按钮失败)", "未知", app_name)
         return False
 
-    # ── 4. 处理弹窗内 CF 验证 ────────────────────────────────
+    # ── 5. 处理弹窗内 CF 验证 ────────────────────────────────
     print("检查续期弹窗内是否需要 CF 验证...")
     if sb.execute_script(_EXISTS_JS):
         if not handle_turnstile(sb):
             print("弹窗内的 Turnstile 验证失败")
-            dump_debug(sb, "renew_turnstile_fail")
-            send_tg_message("[X]", "续期失败(人机验证未过)", "未知")
+            dump_debug(sb, f"renew_{app_id}_turnstile_fail")
+            send_tg_message("[X]", "续期失败(人机验证未过)", "未知", app_name)
             return False
     else:
         print("弹窗内未检测到 Turnstile")
 
-    # ── 5. 确认续期 ──────────────────────────────────────────
+    # ── 6. 确认续期 ──────────────────────────────────────────
     print("点击 Just Reset 确认续期...")
     try:
         sb.click('button:contains("Just Reset")')
@@ -475,16 +436,15 @@ def renew(sb) -> bool:
         time.sleep(5)
     except Exception as e:
         print(f"找不到 Just Reset 按钮: {e}")
-        dump_debug(sb, "renew_just_reset_not_found")
-        send_tg_message("[X]", "续期失败(无法确认)", "未知")
+        dump_debug(sb, f"renew_{app_id}_just_reset_not_found")
+        send_tg_message("[X]", "续期失败(无法确认)", "未知", app_name)
         return False
 
-    # ── 6. 验证倒计时 ────────────────────────────────────────
+    # ── 7. 验证倒计时 ────────────────────────────────────────
     print("验证最终倒计时状态...")
     try:
         sb.refresh()
         time.sleep(4)
-        # 主选择器 + 后备：任意 font-mono 元素
         try:
             timer_text = sb.get_text('span.font-mono.text-xl')
         except Exception:
@@ -502,18 +462,18 @@ def renew(sb) -> bool:
 
         if "2 days 23" in timer_text or "3 days" in timer_text:
             print("续期任务完成！")
-            sb.save_screenshot("renew_success.png")
-            send_tg_message("[OK]", "续期完成", timer_text)
+            sb.save_screenshot(f"renew_{app_id}_success.png")
+            send_tg_message("[OK]", "续期完成", timer_text, app_name)
             return True
         else:
             print("倒计时似乎没有重置到最高值，请人工检查截图。")
-            dump_debug(sb, "renew_warning")
-            send_tg_message("[!]", "续期异常(请检查)", timer_text)
+            dump_debug(sb, f"renew_{app_id}_warning")
+            send_tg_message("[!]", "续期异常(请检查)", timer_text, app_name)
             return True
     except Exception as e:
         print(f"读取倒计时失败，但流程已执行完毕: {e}")
-        dump_debug(sb, "renew_timer_read_fail")
-        send_tg_message("[!]", "读取剩余时间失败", "未知")
+        dump_debug(sb, f"renew_{app_id}_timer_read_fail")
+        send_tg_message("[!]", "读取剩余时间失败", "未知", app_name)
         return False
 
 # ============================================================
@@ -523,6 +483,7 @@ def main():
     print("=" * 50)
     print("   JustRunMy.app 自动登录与续期脚本")
     print("=" * 50)
+    print(f"待续期应用 ID: {', '.join(APP_IDS)}")
 
     proxy_url_env = os.environ.get("PROXY_URL", "").strip()
     sb_kwargs = {"uc": True, "test": True, "headless": False}
@@ -541,11 +502,28 @@ def main():
         except Exception:
             pass
 
-        if login(sb):
-            renew(sb)
-        else:
+        if not login(sb):
             print("\n登录环节失败，终止后续续期操作。")
             send_tg_message("[X]", "登录失败", "未知")
+            sys.exit(1)
+
+        results = {}
+        for app_id in APP_IDS:
+            try:
+                results[app_id] = renew_app(sb, app_id)
+            except Exception as e:
+                print(f"应用 {app_id} 续期发生未捕获异常: {e}")
+                results[app_id] = False
+            time.sleep(2)
+
+        print("\n" + "=" * 50)
+        print("   续期结果汇总")
+        for app_id, ok in results.items():
+            print(f"   App {app_id}: {'成功' if ok else '失败'}")
+        print("=" * 50)
+
+        if not all(results.values()):
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
