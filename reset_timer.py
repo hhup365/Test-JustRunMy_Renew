@@ -31,7 +31,6 @@ if not APP_IDS_RAW:
     print("请配置 ID_x Secret，值为应用 ID，多个用逗号分隔，如: 37754,37755")
     sys.exit(1)
 
-# 支持逗号/空格/换行分隔的多个应用 ID
 APP_IDS = [i for i in re.split(r"[,\s]+", APP_IDS_RAW) if i.isdigit()]
 if not APP_IDS:
     print(f"致命错误：APP_IDS 格式无效: {APP_IDS_RAW}")
@@ -176,15 +175,6 @@ _COORDS_JS = """
 _WININFO_JS = """
 (function(){
     return {sx: window.screenX || 0, sy: window.screenY || 0, oh: window.outerHeight, ih: window.innerHeight};
-})()
-"""
-
-_RESET_BTN_JS = """
-return (function(){
-    var btns = document.querySelectorAll('button');
-    for (var i = 0; i < btns.length; i++)
-        if ((btns[i].textContent || '').includes('Reset Timer')) return true;
-    return false;
 })()
 """
 
@@ -364,8 +354,7 @@ def login(sb) -> bool:
     print("等待登录完成并验证会话...")
     time.sleep(5)
 
-    # 不能仅凭 URL 变化判断登录成功。
-    # 直接访问控制面板并检查登录表单是否再次出现，以确认认证 Cookie 真正生效。
+    # 直接访问控制面板并检查登录表单是否再次出现，确认认证 Cookie 真正生效
     sb.open(PANEL_URL)
     time.sleep(5)
 
@@ -380,7 +369,7 @@ def login(sb) -> bool:
     return False
 
 # ============================================================
-#  单应用续期模块
+#  单应用续期模块（与已验证可用的参考流程完全一致）
 # ============================================================
 def renew_app(sb, app_id: str) -> bool:
     global DYNAMIC_APP_NAME
@@ -397,53 +386,14 @@ def renew_app(sb, app_id: str) -> bool:
     time.sleep(5)
     print(f"当前应用详情页: {sb.get_current_url()}")
 
-    if "/id/Account/Login" in sb.get_current_url():
-        print("被重定向回登录页，会话已失效！")
-        dump_debug(sb, f"renew_{app_id}_session_lost")
-        send_tg_message("[X]", "续期失败(会话失效)", "未知")
-        return False
-
-    # 尝试读取应用名称（失败不影响流程）
-    try:
-        name = sb.execute_script("""
-            return (function(){
-                var h = document.querySelector('h1, h2, h3');
-                return h ? h.textContent.trim() : '';
-            })()
-        """)
-        if name:
-            DYNAMIC_APP_NAME = name
-    except Exception:
-        pass
-    print(f"当前应用名称: {DYNAMIC_APP_NAME}")
-
-    # 等待 Blazor 渲染出 Reset Timer 按钮
-    print("等待 Reset Timer 按钮渲染（最长 30s）...")
-    btn_ready = False
-    for i in range(60):
-        try:
-            if sb.execute_script(_RESET_BTN_JS):
-                print(f"  按钮已渲染（耗时约 {i * 0.5:.1f}s）")
-                btn_ready = True
-                break
-        except Exception:
-            pass
-        time.sleep(0.5)
-
-    if not btn_ready:
-        print("找不到 Reset Timer 按钮")
-        dump_debug(sb, f"renew_{app_id}_reset_btn_not_found")
-        send_tg_message("[X]", "续期失败(找不到按钮)", "未知")
-        return False
-
     print("点击 Reset Timer 按钮...")
     try:
-        sb.click('button:contains("Reset Timer")')
+        sb.click('button:contains("Reset Timer")', timeout=30)
         time.sleep(3)
     except Exception as e:
-        print(f"点击 Reset Timer 失败: {e}")
-        dump_debug(sb, f"renew_{app_id}_reset_click_fail")
-        send_tg_message("[X]", "续期失败(点击按钮失败)", "未知")
+        print(f"找不到 Reset Timer 按钮: {e}")
+        dump_debug(sb, f"renew_{app_id}_reset_btn_not_found")
+        send_tg_message("[X]", "续期失败(找不到按钮)", "未知")
         return False
 
     print("检查续期弹窗内是否需要 CF 验证...")
@@ -458,7 +408,7 @@ def renew_app(sb, app_id: str) -> bool:
 
     print("点击 Just Reset 确认续期...")
     try:
-        sb.click('button:contains("Just Reset")')
+        sb.click('button:contains("Just Reset")', timeout=15)
         print("提交续期请求，等待服务器处理...")
         time.sleep(5)
     except Exception as e:
