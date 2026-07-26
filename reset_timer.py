@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import re
 import sys
 import time
 import json
@@ -167,7 +168,7 @@ _WININFO_JS = """
 })()
 """
 
-# 自动抓取应用列表：返回 [{href, name}, ...]（去重）
+# 策略1：抓取所有 /panel/application/<id> 链接（去重）
 _FIND_APPS_JS = """
 return (function(){
     var result = [];
@@ -184,6 +185,19 @@ return (function(){
         result.push({href: '/panel/application/' + m[1], name: name || ('App-' + m[1])});
     }
     return result;
+})()
+"""
+
+# 策略2：列出所有候选卡片标题（h3）
+_LIST_H3_JS = """
+return (function(){
+    var out = [];
+    var els = document.querySelectorAll('h3');
+    for (var i = 0; i < els.length; i++) {
+        var t = (els[i].textContent || '').trim();
+        if (t && t.length < 100) out.push(t);
+    }
+    return out;
 })()
 """
 
@@ -404,10 +418,13 @@ def login(sb) -> bool:
     return False
 
 # ============================================================
-#  自动发现应用列表
+#  自动发现应用列表（双策略）
 # ============================================================
 def discover_apps(sb):
-    """打开应用列表页，自动抓取全部应用（ID + 名称）"""
+    """打开应用列表页，自动发现全部应用。
+    策略1: 抓取 a[href*='/panel/application/'] 链接
+    策略2: 逐个点击卡片(h3)，从跳转后的 URL 捕获应用 ID
+    """
     print(f"\n进入应用列表页自动发现应用: {APPS_URL}")
     sb.open(APPS_URL)
     time.sleep(3)
@@ -417,16 +434,71 @@ def discover_apps(sb):
         dump_debug(sb, "discover_session_lost")
         return []
 
-    if not wait_for_blazor(sb, _FIND_APPS_JS + ".length > 0" if False else
-                           "return (" + _FIND_APPS_JS.replace("return ", "", 1) + ").length > 0",
-                           timeout=30, desc="应用列表"):
-        dump_debug(sb, "discover_apps_not_found")
-        return []
+    # 等待 Blazor 渲染出任意内容（链接或 h3 卡片）
+    print("等待 Blazor 渲染应用列表（最长 30s）...")
+    apps = []
+    h3_titles = []
+    for i in range(60):
+        try:
+            apps = sb.execute_script(_FIND_APPS_JS) or []
+            if apps:
+                print(f"  [策略1] 通过链接发现应用（耗时约 {i * 0.5:.1f}s）")
+                break
+            h3_titles = sb.execute_script(_LIST_H3_JS) or []
+            if h3_titles:
+                print(f"  [策略2] 发现 {len(h3_titles)} 个卡片标题（耗时约 {i * 0.5:.1f}s）")
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
 
-    apps = sb.execute_script(_FIND_APPS_JS)
-    print(f"共发现 {len(apps)} 个应用:")
-    for a in apps:
-        print(f"  - {a['name']} -> {a['href']}")
+    # 策略1 命中，直接返回
+    if apps:
+        print(f"共发现 {len(apps)} 个应用:")
+        for a in apps:
+            print(f"  - {a['name']} -> {a['href']}")
+        return apps
+
+    # 策略2：逐个点击 h3 卡片，从跳转后 URL 捕获应用 ID
+    if h3_titles:
+        print(f"卡片非链接结构，改用点击方式捕获应用 ID: {h3_titles}")
+        for idx, title in enumerate(h3_titles):
+            try:
+                sb.open(APPS_URL)
+                # 等待卡片重新渲染
+                for _ in range(30):
+                    if sb.execute_script(_LIST_H3_JS):
+                        break
+                    time.sleep(0.5)
+                # 点击第 idx 个 h3 卡片
+                sb.execute_script(f"""
+                    (function(){{
+                        var els = document.querySelectorAll('h3');
+                        var valid = [];
+                        for (var i = 0; i < els.length; i++) {{
+                            var t = (els[i].textContent || '').trim();
+                            if (t && t.length < 100) valid.push(els[i]);
+                        }}
+                        if (valid[{idx}]) valid[{idx}].click();
+                    }})()
+                """)
+                # 等待 URL 跳转到详情页
+                for _ in range(20):
+                    time.sleep(0.5)
+                    m = re.search(r"/panel/application/(\d+)", sb.get_current_url())
+                    if m:
+                        apps.append({"href": f"/panel/application/{m.group(1)}",
+                                     "name": title})
+                        print(f"  捕获应用: {title} -> /panel/application/{m.group(1)}")
+                        break
+                else:
+                    print(f"  点击卡片 [{title}] 后未跳转到详情页")
+            except Exception as e:
+                print(f"  处理卡片 [{title}] 异常: {e}")
+
+    if not apps:
+        print("  两种策略均未发现应用")
+        dump_debug(sb, "discover_apps_not_found")
     return apps
 
 # ============================================================
