@@ -388,7 +388,7 @@ def renew_app(sb, app_id: str) -> bool:
 
     print("点击 Reset Timer 按钮...")
     try:
-        sb.click('button:contains("Reset Timer")', timeout=30)
+        sb.click('button[aria-label="Reset timer"]', timeout=30)
         time.sleep(3)
     except Exception as e:
         print(f"找不到 Reset Timer 按钮: {e}")
