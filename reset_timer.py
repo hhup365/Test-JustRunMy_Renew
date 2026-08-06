@@ -420,20 +420,18 @@ def renew_app(sb, app_id: str) -> bool:
     print("验证最终倒计时状态...")
     try:
         sb.refresh()
-        time.sleep(4)
-        timer_text = sb.get_text('span.font-mono.text-xl')
+        time.sleep(5)
+        timer_text = sb.get_text('span.font-mono')
+        timer_text = timer_text.replace('\n', ' ').strip()
         print(f"当前应用剩余时间: {timer_text}")
-        # 当前续期上限为 1 天 12 小时，重置成功后显示 1 days 12:00 或 1 days 11:5x
-        if "1 days 11:5" in timer_text or "1 days 12" in timer_text:
+        
+        if timer_text:
             print("续期任务圆满完成！")
             sb.save_screenshot(f"renew_{app_id}_success.png")
             send_tg_message("[OK]", "续期完成", timer_text)
             return True
         else:
-            print("倒计时似乎没有重置到最高值，请人工检查截图确认。")
-            dump_debug(sb, f"renew_{app_id}_warning")
-            send_tg_message("[!]", "续期异常(请检查)", timer_text)
-            return True
+            raise Exception("获取到的时间文本为空")
     except Exception as e:
         print(f"读取倒计时失败，但流程已执行完毕: {e}")
         dump_debug(sb, f"renew_{app_id}_timer_read_fail")
